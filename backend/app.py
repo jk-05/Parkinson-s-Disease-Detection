@@ -19,6 +19,17 @@ from flask_sqlalchemy import SQLAlchemy
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- FFmpeg Configuration for Windows ---
+try:
+    import imageio_ffmpeg
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    os.environ["PATH"] += os.pathsep + os.path.dirname(ffmpeg_path)
+    logger.info(f"FFmpeg configured via imageio-ffmpeg: {ffmpeg_path}")
+except ImportError:
+    logger.warning("imageio-ffmpeg not found. Audio conversion may fail if system ffmpeg is missing.")
+except Exception as e:
+    logger.error(f"Error configuring FFmpeg: {e}")
+
 app = Flask(__name__)
 CORS(app)
 
@@ -176,21 +187,74 @@ def predict():
 def predict_voice():
     import random
     
-    # Check if a previous result (from spiral) was sent
-    previous_result = request.form.get("previous_result")
-    
-    if previous_result and previous_result in ["Healthy", "Parkinson"]:
-        result = previous_result
-        # High confidence if matching, just for demo consistency
-        confidence = round(random.uniform(0.8, 0.95), 2)
-    else:
-        result = random.choice(["Healthy", "Parkinson"])
-        confidence = round(random.uniform(0.5, 0.9), 2)
+    if 'file' not in request.files:
+        return jsonify({"error": "No voice file uploaded"}), 400
 
-    return jsonify({
-        "result": result,
-        "confidence": confidence
-    })
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    try:
+        # Create temp directory if not exists
+        temp_dir = os.path.join(BASE_DIR, "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # Save original file (likely .webm or .ogg from browser)
+        timestamp = datetime.now().timestamp()
+        original_filename = f"voice_{timestamp}_{file.filename}"
+        original_path = os.path.join(temp_dir, original_filename)
+        file.save(original_path)
+        logger.info(f"Saved original voice file to: {original_path}")
+
+        # Convert to WAV
+        wav_filename = f"voice_{timestamp}.wav"
+        wav_path = os.path.join(temp_dir, wav_filename)
+        
+        try:
+            # Use pydub for conversion (more robust)
+            from pydub import AudioSegment
+            
+            # Explicitly set ffmpeg path for pydub if configured
+            if 'imageio_ffmpeg' in globals():
+                 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+
+            sound = AudioSegment.from_file(original_path)
+            sound.export(wav_path, format="wav")
+            logger.info(f"Converted and saved WAV file to: {wav_path}")
+            
+        except Exception as conversion_error:
+            logger.error(f"Pydub conversion failed: {conversion_error}")
+            # Fallback or re-raise depending on strictness
+            # For now, let's try librosa as backup or just fail
+            logger.info("Attempting fallback to librosa...")
+            y, sr = librosa.load(original_path, sr=22050)
+            sf.write(wav_path, y, sr)
+            logger.info(f"Fallback conversion successful: {wav_path}")
+
+        # --- HERE YOU WOULD RUN YOUR MODEL ON wav_path ---
+        # For now, we keep the random/mock prediction logic as placeholder
+        
+        # Check if a previous result (from spiral) was sent
+        previous_result = request.form.get("previous_result")
+        
+        if previous_result and previous_result in ["Healthy", "Parkinson"]:
+            result = previous_result
+            # High confidence if matching, just for demo consistency
+            confidence = round(random.uniform(0.8, 0.95), 2)
+        else:
+            result = random.choice(["Healthy", "Parkinson"])
+            confidence = round(random.uniform(0.5, 0.9), 2)
+
+        return jsonify({
+            "result": result,
+            "confidence": confidence,
+            "message": "Voice file processed and saved successfully"
+        })
+
+    except Exception as e:
+        logger.error(f"Error processing voice file: {e}")
+        # traceback.print_exc()
+        return jsonify({"error": f"Failed to process audio: {str(e)}"}), 500
 
 @app.route("/login", methods=["POST"])
 def login():
