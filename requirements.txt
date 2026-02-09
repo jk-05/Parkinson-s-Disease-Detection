@@ -1,0 +1,12 @@
+flask
+tensorflow
+numpy
+pillow
+flask-cors
+librosa
+soundfile
+flask-sqlalchemy
+mysql-connector-python
+imageio-ffmpeg
+pydub
+requests
