@@ -282,7 +282,7 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
     };
 
     const sections = advice ? parseAdvice(advice) : null;
-    const isPositive = prediction.toLowerCase().includes("positive");
+    const isPositive = prediction.toLowerCase().includes("positive") || prediction.toLowerCase().includes("parkinson");
     const confidencePercent = parseFloat(confidence);
 
     return (

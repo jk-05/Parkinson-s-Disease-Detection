@@ -14,6 +14,8 @@ from datetime import datetime
 import librosa
 import soundfile as sf
 from flask_sqlalchemy import SQLAlchemy
+from feature_extraction import extract_voice_features
+from svm_predict import predict_parkinsons_voice
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -205,50 +207,56 @@ def predict_voice():
         original_path = os.path.join(temp_dir, original_filename)
         file.save(original_path)
         logger.info(f"Saved original voice file to: {original_path}")
-
-        # Convert to WAV
-        wav_filename = f"voice_{timestamp}.wav"
+        
+        # Convert to strict WAV format to prevent librosa/audioread from crashing Windows
+        wav_filename = f"voice_{timestamp}_converted.wav"
         wav_path = os.path.join(temp_dir, wav_filename)
         
         try:
-            # Use pydub for conversion (more robust)
-            from pydub import AudioSegment
+            import subprocess
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
             
-            # Explicitly set ffmpeg path for pydub if configured
-            if 'imageio_ffmpeg' in globals():
-                 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
-
-            sound = AudioSegment.from_file(original_path)
-            sound.export(wav_path, format="wav")
-            logger.info(f"Converted and saved WAV file to: {wav_path}")
+            # Use subprocess to reliably call ffmpeg and convert the webm audio blob to standard wav
+            # -y overwrites if exists. -i is input.
+            cmd = [ffmpeg_exe, "-y", "-i", original_path, wav_path]
             
-        except Exception as conversion_error:
-            logger.error(f"Pydub conversion failed: {conversion_error}")
-            # Fallback or re-raise depending on strictness
-            # For now, let's try librosa as backup or just fail
-            logger.info("Attempting fallback to librosa...")
-            y, sr = librosa.load(original_path, sr=22050)
-            sf.write(wav_path, y, sr)
-            logger.info(f"Fallback conversion successful: {wav_path}")
+            # Run the command, capturing output to avoid locking up
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            if process.returncode != 0:
+                logger.error(f"FFmpeg conversion failed: {process.stderr.decode('utf-8')}")
+                return jsonify({"error": "Failed to convert audio file format via FFmpeg."}), 500
+                
+            logger.info(f"Successfully converted audio to WAV format: {wav_path}")
+            
+        except Exception as e:
+            logger.error(f"Error executing FFmpeg conversion: {e}")
+            return jsonify({"error": f"Server missing dependencies for audio conversion: {str(e)}"}), 500
 
-        # --- HERE YOU WOULD RUN YOUR MODEL ON wav_path ---
-        # For now, we keep the random/mock prediction logic as placeholder
-        
-        # Check if a previous result (from spiral) was sent
-        previous_result = request.form.get("previous_result")
-        
-        if previous_result and previous_result in ["Healthy", "Parkinson"]:
-            result = previous_result
-            # High confidence if matching, just for demo consistency
-            confidence = round(random.uniform(0.8, 0.95), 2)
-        else:
-            result = random.choice(["Healthy", "Parkinson"])
-            confidence = round(random.uniform(0.5, 0.9), 2)
+        # Extract features from the standard WAV file
+        try:
+            features = extract_voice_features(wav_path)
+            logger.info("Features extracted successfully.")
+        except Exception as e:
+            logger.error(f"Error during feature extraction: {e}")
+            return jsonify({"error": f"Failed to extract features from audio: {str(e)}"}), 500
+            
+        # Predict using the SVM model
+        try:
+            prediction_output = predict_parkinsons_voice(features)
+            result = prediction_output["result"]
+            confidence = prediction_output["confidence"]
+        except Exception as e:
+            logger.error(f"Error during SVM prediction: {e}")
+            return jsonify({"error": f"Model inference failed: {str(e)}"}), 500
+
+        logger.info(f"Voice Prediction: {result} with confidence {confidence}")
 
         return jsonify({
             "result": result,
             "confidence": confidence,
-            "message": "Voice file processed and saved successfully"
+            "message": "Voice file processed successfully"
         })
 
     except Exception as e:
