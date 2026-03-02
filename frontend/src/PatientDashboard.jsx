@@ -65,6 +65,7 @@ function PatientDashboard() {
     const [mediaRecorder, setMediaRecorder] = useState(null);
     const [voicePrediction, setVoicePrediction] = useState(null);
     const [voiceConfidence, setVoiceConfidence] = useState(0);
+    const [voiceMetrics, setVoiceMetrics] = useState(null);
     const [voiceLoading, setVoiceLoading] = useState(false);
     const [voiceError, setVoiceError] = useState(null);
 
@@ -117,6 +118,7 @@ function PatientDashboard() {
             setIsRecording(true);
             setVoiceFile(null);
             setVoicePrediction(null);
+            setVoiceMetrics(null);
             setVoiceError(null);
 
             // Timer
@@ -149,6 +151,7 @@ function PatientDashboard() {
         if (file) {
             setVoiceFile(file);
             setVoicePrediction(null);
+            setVoiceMetrics(null);
             setVoiceError(null);
         }
     };
@@ -172,9 +175,11 @@ function PatientDashboard() {
 
             const res = response.data.result;
             const conf = (response.data.confidence * 100).toFixed(2);
+            const metrics = response.data.metrics;
 
             setVoicePrediction(res);
             setVoiceConfidence(conf);
+            setVoiceMetrics(metrics);
 
             // Save result
             saveToDb('voice', res, conf);
@@ -529,6 +534,26 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
                                             />
                                         </div>
                                     </div>
+                                    {voiceMetrics && (
+                                        <div className="metrics-grid" style={{ marginTop: "1rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", background: "rgba(0,0,0,0.2)", padding: "1rem", borderRadius: "8px" }}>
+                                            <div className="metric-item">
+                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Pitch Instability</span>
+                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.pitch_instability.toFixed(2)}</div>
+                                            </div>
+                                            <div className="metric-item">
+                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Tremor Index</span>
+                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.tremor_index.toFixed(2)}</div>
+                                            </div>
+                                            <div className="metric-item">
+                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Pause Ratio</span>
+                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.pause_ratio.toFixed(2)}</div>
+                                            </div>
+                                            <div className="metric-item">
+                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Energy Variation</span>
+                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.energy_variation.toFixed(2)}</div>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 

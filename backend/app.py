@@ -14,8 +14,7 @@ from datetime import datetime
 import librosa
 import soundfile as sf
 from flask_sqlalchemy import SQLAlchemy
-from feature_extraction import extract_voice_features
-from svm_predict import predict_parkinsons_voice
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -234,28 +233,40 @@ def predict_voice():
             logger.error(f"Error executing FFmpeg conversion: {e}")
             return jsonify({"error": f"Server missing dependencies for audio conversion: {str(e)}"}), 500
 
-        # Extract features from the standard WAV file
+        # Extract features and calculate score using new voice_analysis.py
         try:
-            features = extract_voice_features(wav_path)
-            logger.info("Features extracted successfully.")
+            from voice_analysis import analyze_voice
+            voice_data = analyze_voice(wav_path)
+            voice_score = voice_data["voice_score"]
+            metrics = voice_data["metrics"]
+            logger.info("Voice analysis successfully completed.")
         except Exception as e:
-            logger.error(f"Error during feature extraction: {e}")
-            return jsonify({"error": f"Failed to extract features from audio: {str(e)}"}), 500
+            logger.error(f"Error during voice analysis: {e}")
+            return jsonify({"error": f"Failed to analyze audio: {str(e)}"}), 500
             
-        # Predict using the SVM model
-        try:
-            prediction_output = predict_parkinsons_voice(features)
-            result = prediction_output["result"]
-            confidence = prediction_output["confidence"]
-        except Exception as e:
-            logger.error(f"Error during SVM prediction: {e}")
-            return jsonify({"error": f"Model inference failed: {str(e)}"}), 500
+        # Combine with Spiral CNN output
+        previous_result = request.form.get("previous_result")
+        if previous_result:
+            is_spiral_parkinson = "parkinson" in previous_result.lower()
+            # Assign a probability score based on the spiral result
+            spiral_score = 0.8 if is_spiral_parkinson else 0.2
+            # Combine scores (adjust weights as needed)
+            final_risk = (0.5 * spiral_score) + (0.5 * voice_score)
+        else:
+            final_risk = voice_score
+            
+        result = "Parkinson Detected" if final_risk >= 0.5 else "Healthy"
+        # Confidence is the probability of the predicted class
+        confidence = float(final_risk) if final_risk >= 0.5 else float(1.0 - final_risk)
 
-        logger.info(f"Voice Prediction: {result} with confidence {confidence}")
+        logger.info(f"Final Risk: {final_risk}, Result: {result}, Confidence: {confidence}")
 
         return jsonify({
             "result": result,
             "confidence": confidence,
+            "voice_score": voice_score,
+            "metrics": metrics,
+            "final_risk": final_risk,
             "message": "Voice file processed successfully"
         })
 
