@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import html2pdf from "html2pdf.js";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import "./App.css";
 
 // ⚠️ SECURITY NOTE: Key is now in .env
@@ -38,7 +39,9 @@ const AdviceList = ({ content }) => {
     const items = content
         .split('\n')
         .map(item => item.trim())
-        .filter(item => item.length > 0)
+        .filter(item => item.length > 0 && !item.startsWith('###'))
+        // Filter out lines that are just a single bullet/asterisk or empty bold tags
+        .filter(item => item.replace(/^[•\-\*]+\s*$/, '').length > 0)
         .map((item, index) => (
             <li key={index}>{item.replace(/^[•\-\*]\s*/, '')}</li>
         ));
@@ -58,6 +61,10 @@ function PatientDashboard() {
     const [advice, setAdvice] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
+
+    const [finalRiskScore, setFinalRiskScore] = useState(0);
+    const [progressionData, setProgressionData] = useState(null);
+    const [estimatedStage, setEstimatedStage] = useState("");
 
     // --- Voice UI State ---
     const [step, setStep] = useState(1); // 1: Handwriting, 2: Voice
@@ -178,7 +185,9 @@ function PatientDashboard() {
             const res = response.data.result;
             const conf = (response.data.confidence * 100).toFixed(2);
             const metrics = response.data.metrics;
+            const risk = response.data.final_risk || (response.data.voice_score || 0);
 
+            setFinalRiskScore(risk);
             setVoicePrediction(res);
             setVoiceConfidence(conf);
             setVoiceMetrics(metrics);
@@ -261,11 +270,14 @@ function PatientDashboard() {
         setError(null);
 
         try {
+            const patientAge = localStorage.getItem("patientAge") || "Unknown";
+
             // Generate advice from Gemini using COMBINED results
             const prompt = `
 You are an expert neurological health advisor. Provide a clear, empathetic, and supportive response analyzing a patient's Parkinson's Disease risk profile based on two distinct AI diagnostic tests.
 
 Patient's Results:
+- Age: ${patientAge}
 1. Spiral Handwriting Analysis Scan Result: "${prediction}" (Confidence: ${confidence}%)
 2. Voice Analysis Result: "${voicePrediction}" (Confidence: ${voiceConfidence}%)
    - Pitch Instability: ${voiceMetrics?.pitch_instability?.toFixed(2)} (Normal: < 0.5)
@@ -273,7 +285,7 @@ Patient's Results:
    - Pause Ratio: ${voiceMetrics?.pause_ratio?.toFixed(2)} (Normal: < 0.5)
    - Energy Variation: ${voiceMetrics?.energy_variation?.toFixed(2)} (Normal: < 0.5)
 
-Considering BOTH of these sets of inputs and metrics, provide advice using the following structure with clear section markers:
+Considering BOTH of these sets of inputs and metrics (along with the patient's age), provide advice using the following structure with clear section markers:
 
 [SUMMARY]
 One brief sentence combined overview and immediate recommended action based on the overall risk.
@@ -309,6 +321,34 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
                 geminiResponse.data.candidates?.[0]?.content?.parts?.[0]?.text ||
                 "No detailed advice could be generated at this time.";
             setAdvice(aiText);
+
+            // Fetch Progression Data
+            try {
+                // Calculate true risk score for progression
+                let spiralRisk = prediction.toLowerCase().includes("parkinson") || prediction.toLowerCase().includes("positive")
+                    ? parseFloat(confidence) / 100
+                    : 1 - (parseFloat(confidence) / 100);
+
+                let voiceRisk = finalRiskScore;
+                if (voiceRisk === 0 || !voiceRisk) {
+                    voiceRisk = voicePrediction.toLowerCase().includes("parkinson") || voicePrediction.toLowerCase().includes("positive")
+                        ? parseFloat(voiceConfidence) / 100
+                        : 1 - (parseFloat(voiceConfidence) / 100);
+                }
+
+                const combinedRiskScore = (spiralRisk + voiceRisk) / 2;
+
+                const age = parseInt(localStorage.getItem("patientAge")) || 65;
+                const progRes = await axios.post("http://127.0.0.1:5000/predict-progression", {
+                    risk_score: combinedRiskScore,
+                    age: age,
+                    symptom_score: voiceMetrics?.tremor_index || 0
+                });
+                setProgressionData(progRes.data.progression);
+                setEstimatedStage(progRes.data.estimated_stage);
+            } catch (pErr) {
+                console.error("Progression Error:", pErr);
+            }
 
         } catch (err) {
             console.error("AI Generation Error:", err);
@@ -760,6 +800,49 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
                                                 </div>
                                             )}
                                         </div>
+
+                                        {/* Progression Timeline Simulator */}
+                                        {progressionData && (
+                                            <div className="card" style={{ marginTop: "1.5rem", background: "rgba(0,0,0,0.25)" }}>
+                                                <h3 className="card-title" style={{ justifyContent: "center", marginBottom: "1rem" }}>
+                                                    <span className="icon">📈</span>
+                                                    Parkinson Progression Simulator
+                                                </h3>
+                                                <div style={{ textAlign: "center", marginBottom: "1rem" }}>
+                                                    <p style={{ fontSize: "1.1rem", marginBottom: "0.25rem" }}><strong>Estimated Status:</strong> <span style={{ color: "#f87171" }}>{estimatedStage}</span></p>
+                                                    <p style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.5)", marginBottom: "1rem" }}>(Algorithm: Clinical Rule-Based Heuristic using Hoehn & Yahr Staging)</p>
+                                                    <p style={{ fontSize: "0.9rem", color: "rgba(255,255,255,0.7)" }}>Predicted progression trajectory based on your current assessment scores:</p>
+                                                </div>
+
+                                                <div style={{ width: "100%", height: 300, background: "rgba(255,255,255,0.05)", borderRadius: "8px", padding: "1rem" }}>
+                                                    <ResponsiveContainer width="100%" height="100%">
+                                                        <LineChart data={progressionData.map(d => ({ year: new Date().getFullYear() + d.year, stageDesc: d.stage, stageVal: d.year }))} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                                                            <XAxis dataKey="year" stroke="rgba(255,255,255,0.5)" />
+                                                            <YAxis stroke="rgba(255,255,255,0.5)" hide={true} />
+                                                            <Tooltip
+                                                                contentStyle={{ backgroundColor: "#1f2937", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
+                                                                itemStyle={{ color: "#4ade80" }}
+                                                                labelStyle={{ color: "rgba(255,255,255,0.8)", fontWeight: "bold", marginBottom: "5px" }}
+                                                                formatter={(value, name, props) => [props.payload.stageDesc, "Predicted Phase"]}
+                                                            />
+                                                            <Line type="monotone" dataKey="stageVal" stroke="#3b82f6" strokeWidth={3} dot={{ fill: '#60a5fa', stroke: '#2563eb', strokeWidth: 2, r: 5 }} activeDot={{ r: 8 }} />
+                                                        </LineChart>
+                                                    </ResponsiveContainer>
+                                                </div>
+
+                                                <div style={{ marginTop: "1.5rem", padding: "1rem", background: "rgba(255,255,255,0.05)", borderRadius: "8px" }}>
+                                                    <h4 style={{ marginBottom: "0.75rem", color: "rgba(255,255,255,0.9)" }}>Timeline Details</h4>
+                                                    <ul style={{ listStyleType: "none", padding: 0, margin: 0 }}>
+                                                        {progressionData.map((d, i) => (
+                                                            <li key={i} style={{ marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "10px" }}>
+                                                                <span style={{ background: "rgba(59, 130, 246, 0.2)", color: "#93c5fd", padding: "2px 8px", borderRadius: "12px", fontSize: "0.85rem", fontWeight: "bold" }}>Year {new Date().getFullYear() + d.year}</span>
+                                                                <span style={{ color: "rgba(255,255,255,0.8)" }}>→ {d.stage}</span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            </div>
+                                        )}
                                     </>
                                 )}
                             </div>

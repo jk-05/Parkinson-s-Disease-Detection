@@ -27,6 +27,9 @@ function Login() {
                 localStorage.setItem("userRole", role);
                 localStorage.setItem("username", response.data.name); // Using real name
                 localStorage.setItem("patientId", response.data.id); // Save ID for saving results
+                if (response.data.age) {
+                    localStorage.setItem("patientAge", response.data.age);
+                }
 
                 if (role === "doctor") {
                     navigate("/doctor");
@@ -112,7 +115,6 @@ function Login() {
                 )}
 
                 <p style={{ marginTop: "1rem", fontSize: "0.8rem", color: "rgba(255,255,255,0.5)", textAlign: "center" }}>
-                    Doctor: <b>doctor / password</b>
                 </p>
             </div>
         </div>

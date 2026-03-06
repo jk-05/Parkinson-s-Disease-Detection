@@ -4,6 +4,7 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 from flask import Flask, request, jsonify
 from tensorflow.keras.models import load_model
+from progression_predictor import predict_progression, estimate_stage
 import numpy as np
 from PIL import Image
 from io import BytesIO
@@ -423,7 +424,8 @@ def login():
         # Return user ID for session storage
         # Check if user has a name attribute (Doctor/Patient have it)
         name = getattr(user, 'name', username)
-        return jsonify({"message": "Login successful", "id": user.id, "name": name})
+        age = getattr(user, 'age', None) if role == 'patient' else None
+        return jsonify({"message": "Login successful", "id": user.id, "name": name, "age": age})
     return jsonify({"error": "Invalid credentials"}), 401
 
 @app.route("/register", methods=["POST"])
@@ -500,6 +502,25 @@ def get_results():
         ])
     except Exception as e:
         logger.error(f"Fetch results error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/predict-progression", methods=["POST"])
+def progression():
+    try:
+        data = request.json
+        risk_score = float(data.get("risk_score", 0.0))
+        age = int(data.get("age", 50))
+        symptom_score = float(data.get("symptom_score", 0.0))
+
+        progression_timeline = predict_progression(risk_score, age, symptom_score)
+        stage = estimate_stage(risk_score)
+
+        return jsonify({
+            "progression": progression_timeline,
+            "estimated_stage": stage
+        })
+    except Exception as e:
+        logger.error(f"Progression prediction error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
