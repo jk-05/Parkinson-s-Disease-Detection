@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import html2pdf from "html2pdf.js";
 import "./App.css";
 
 // ⚠️ SECURITY NOTE: Key is now in .env
@@ -53,6 +54,7 @@ function PatientDashboard() {
     const [preview, setPreview] = useState(null);
     const [prediction, setPrediction] = useState("");
     const [confidence, setConfidence] = useState(0);
+    const [heatmapBase64, setHeatmapBase64] = useState(null);
     const [advice, setAdvice] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -226,25 +228,55 @@ function PatientDashboard() {
                 headers: { "Content-Type": "multipart/form-data" },
             });
 
-            const { result, confidence: confidenceValue = 0.5 } = predictionResponse.data;
+            const { result, confidence: confidenceValue = 0.5, heatmap } = predictionResponse.data;
             const confidencePercent = (parseFloat(confidenceValue) * 100).toFixed(2);
 
             setPrediction(result);
             setConfidence(confidencePercent);
+            if (heatmap && !heatmap.startsWith('ERROR')) {
+                setHeatmapBase64(heatmap);
+            }
 
             // Save result
             saveToDb('spiral', result, confidencePercent);
 
-            // 2️⃣ Generate advice from Gemini
+            // Transition directly to Voice Analysis
+            setStep(2);
+
+        } catch (err) {
+            console.error("Analysis Error:", err);
+            setError("Error: Could not complete analysis. Check network, backend server, and API key.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const generateFinalReport = async () => {
+        if (!prediction || !voicePrediction) {
+            setError("Both Handwriting and Voice tests must be completed to generate the final report.");
+            return;
+        }
+
+        setLoading(true);
+        setError(null);
+
+        try {
+            // Generate advice from Gemini using COMBINED results
             const prompt = `
-You are an expert neurological health advisor. Provide a clear, empathetic, and supportive response.
+You are an expert neurological health advisor. Provide a clear, empathetic, and supportive response analyzing a patient's Parkinson's Disease risk profile based on two distinct AI diagnostic tests.
 
-Patient's AI scan result: "${result}" (Confidence: ${confidencePercent}%)
+Patient's Results:
+1. Spiral Handwriting Analysis Scan Result: "${prediction}" (Confidence: ${confidence}%)
+2. Voice Analysis Result: "${voicePrediction}" (Confidence: ${voiceConfidence}%)
+   - Pitch Instability: ${voiceMetrics?.pitch_instability?.toFixed(2)} (Normal: < 0.5)
+   - Tremor Index: ${voiceMetrics?.tremor_index?.toFixed(2)} (Normal: < 0.5)
+   - Pause Ratio: ${voiceMetrics?.pause_ratio?.toFixed(2)} (Normal: < 0.5)
+   - Energy Variation: ${voiceMetrics?.energy_variation?.toFixed(2)} (Normal: < 0.5)
 
-Provide advice using the following structure with clear section markers:
+Considering BOTH of these sets of inputs and metrics, provide advice using the following structure with clear section markers:
 
 [SUMMARY]
-One brief sentence overview and immediate recommended action.
+One brief sentence combined overview and immediate recommended action based on the overall risk.
 
 [LIFESTYLE]
 Provide ONLY 4 concise, actionable tips (one line each):
@@ -260,9 +292,9 @@ Provide ONLY 3 brief action items (one line each):
 • Recommended tests (e.g., discuss the need for a DaTscan or specific blood markers)
 
 [PREVENTION]
-Provide ONLY 3-4 key preventive measures (one line each) based on the prediction:
-- If positive/high risk: Urgent neurologist consultation, medication management, commence physical therapy, establish support network.
-- If negative/low risk: Maintain daily high-intensity aerobic exercise, consistent cognitive challenge (puzzles/reading), annual neurological wellness checkup, balanced anti-inflammatory diet.
+Provide ONLY 3-4 key preventive measures/next steps (one line each) based on the combined final prediction:
+- If high risk in either test: Urgent neurologist consultation, medication management, commence physical therapy, establish support network.
+- If negative/low risk in both: Maintain daily high-intensity aerobic exercise, consistent cognitive challenge (puzzles/reading), annual neurological wellness checkup, balanced anti-inflammatory diet.
 
 Keep each bullet point to ONE line maximum. Be specific and actionable, not generic. Use a bullet point (•) for each tip.
 `;
@@ -279,11 +311,26 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
             setAdvice(aiText);
 
         } catch (err) {
-            console.error("Analysis Error:", err);
-            setError("Error: Could not complete analysis. Check network, backend server, and API key.");
+            console.error("AI Generation Error:", err);
+            setError("Error: Could not generate AI report. Check API key and network.");
         } finally {
             setLoading(false);
         }
+    };
+
+    const downloadPDF = () => {
+        const element = document.getElementById('report-content');
+        if (!element) return;
+
+        const opt = {
+            margin: 0.5,
+            filename: 'NeuroScan_AI_Report.pdf',
+            image: { type: 'jpeg', quality: 0.98 },
+            html2canvas: { scale: 2 },
+            jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+        };
+
+        html2pdf().set(opt).from(element).save();
     };
 
     const sections = advice ? parseAdvice(advice) : null;
@@ -319,24 +366,29 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
 
             <div className="main-grid">
                 {/* Step Navigation */}
-                <div style={{ gridColumn: "1 / -1" }}>
-                    {prediction && (
-                        <div className="step-navigation">
-                            <button
-                                className={`step-btn ${step === 1 ? 'active' : ''}`}
-                                onClick={() => setStep(1)}
-                            >
-                                📝 Handwriting
-                            </button>
-                            <div style={{ width: "2rem", height: "2px", background: "rgba(255,255,255,0.2)", margin: "0 1rem" }}></div>
-                            <button
-                                className={`step-btn ${step === 2 ? 'active' : ''}`}
-                                onClick={() => setStep(2)}
-                            >
-                                🎙️ Voice Analysis
-                            </button>
-                        </div>
-                    )}
+                <div style={{ gridColumn: "1 / -1", marginBottom: "1rem", display: "flex", justifyContent: "center" }}>
+                    <div className="step-navigation" style={{ display: "flex", alignItems: "center" }}>
+                        <button
+                            className={`step-btn ${step === 1 ? 'active' : ''}`}
+                            onClick={() => setStep(1)}
+                        >
+                            📝 Handwriting
+                        </button>
+                        <div style={{ width: "2rem", height: "2px", background: "rgba(255,255,255,0.2)", margin: "0 1rem" }}></div>
+                        <button
+                            className={`step-btn ${step === 2 ? 'active' : ''}`}
+                            onClick={() => setStep(2)}
+                        >
+                            🎙️ Voice Analysis
+                        </button>
+                        <div style={{ width: "2rem", height: "2px", background: "rgba(255,255,255,0.2)", margin: "0 1rem" }}></div>
+                        <button
+                            className={`step-btn ${step === 3 ? 'active' : ''}`}
+                            onClick={() => setStep(3)}
+                        >
+                            📄 Final Report
+                        </button>
+                    </div>
                 </div>
 
                 {step === 1 ? (
@@ -422,16 +474,53 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
                                         </div>
                                     </div>
 
-                                    {/* Summary */}
-                                    {sections?.summary && (
-                                        <div className="summary-card">
-                                            <h3 className="section-title">
-                                                <span className="icon">💡</span>
-                                                Summary
-                                            </h3>
-                                            <p className="summary-text">{sections.summary}</p>
-                                        </div>
-                                    )}
+                                    {/* Spiral Deviation & Heatmap Section */}
+                                    <div style={{ marginTop: "1.5rem", background: "rgba(0,0,0,0.2)", padding: "1rem", borderRadius: "8px" }}>
+                                        <h4 style={{ marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                            <span className="icon">🔍</span> Spiral Deviation Visualizer
+                                        </h4>
+
+                                        {heatmapBase64 && heatmapBase64 !== "null" && !heatmapBase64.startsWith('ERROR') ? (
+                                            <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", justifyContent: "center" }}>
+                                                <div style={{ textAlign: "center", flex: "1 1 auto" }}>
+                                                    <p style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.6)", marginBottom: "0.5rem" }}>Original Scan</p>
+                                                    <img src={preview} alt="Original" style={{ maxWidth: "200px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }} />
+                                                </div>
+                                                <div style={{ textAlign: "center", flex: "1 1 auto" }}>
+                                                    <p style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.6)", marginBottom: "0.5rem" }}>Grad-CAM Heatmap</p>
+                                                    <img src={`data:image/jpeg;base64,${heatmapBase64}`} alt="Heatmap" style={{ maxWidth: "200px", borderRadius: "8px", border: "1px solid rgba(239, 68, 68, 0.4)" }} />
+                                                    <p style={{ fontSize: "0.75rem", color: "#f87171", marginTop: "0.5rem", maxWidth: "200px", margin: "0.5rem auto 0 auto", lineHeight: "1.4" }}>* Red highlighted regions indicate specific deviations (micrographia, tremors) triggering the AI detection.</p>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <p style={{ fontSize: "0.9rem", color: "rgba(255,255,255,0.5)", textAlign: "center", padding: "1rem 0" }}>
+                                                {heatmapBase64?.startsWith('ERROR') ? "The AI was not able to generate a deviation map for this scan structure." : "Heatmap visualization loading or not available."}
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    {/* Algorithm Parameters Box */}
+                                    <div style={{ marginTop: "1rem", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", padding: "1rem" }}>
+                                        <details>
+                                            <summary style={{ cursor: "pointer", fontWeight: "600", color: "#60a5fa", display: "flex", alignItems: "center", gap: "0.5rem", userSelect: "none" }}>
+                                                <span>⚙️ Algorithm Parameters & Details</span>
+                                            </summary>
+                                            <div style={{ marginTop: "1rem", fontSize: "0.85rem", color: "rgba(255,255,255,0.8)", lineHeight: "1.6" }}>
+                                                <ul style={{ paddingLeft: "1.2rem", margin: 0 }}>
+                                                    <li><strong>Model Architecture:</strong> MobileNetV2 Transfer Learning (CNN)</li>
+                                                    <li><strong>Input Resolution:</strong> 224x224 RGB</li>
+                                                    <li><strong>Visual Mapping:</strong> Grad-CAM (Gradient-weighted Class Activation Mapping)</li>
+                                                    <li><strong>Detection Parameters:</strong>
+                                                        <ul style={{ paddingLeft: "1.2rem", marginTop: "0.25rem", color: "rgba(255,255,255,0.6)" }}>
+                                                            <li>Line fluctuations / Kinematic tremors</li>
+                                                            <li>Micrographia (abnormally small, cramped handwriting)</li>
+                                                            <li>Spiral velocity anomalies and pen-lifts</li>
+                                                        </ul>
+                                                    </li>
+                                                </ul>
+                                            </div>
+                                        </details>
+                                    </div>
 
                                     <button
                                         className="analyze-btn"
@@ -449,7 +538,7 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
                             )}
                         </div>
                     </>
-                ) : (
+                ) : step === 2 ? (
                     /* --- Voice Step --- */
                     <div className="card" style={{ gridColumn: "1 / -1" }}>
                         <h2 className="card-title" style={{ justifyContent: "center" }}>
@@ -535,23 +624,43 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
                                         </div>
                                     </div>
                                     {voiceMetrics && (
-                                        <div className="metrics-grid" style={{ marginTop: "1rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", background: "rgba(0,0,0,0.2)", padding: "1rem", borderRadius: "8px" }}>
-                                            <div className="metric-item">
-                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Pitch Instability</span>
-                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.pitch_instability.toFixed(2)}</div>
-                                            </div>
-                                            <div className="metric-item">
-                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Tremor Index</span>
-                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.tremor_index.toFixed(2)}</div>
-                                            </div>
-                                            <div className="metric-item">
-                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Pause Ratio</span>
-                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.pause_ratio.toFixed(2)}</div>
-                                            </div>
-                                            <div className="metric-item">
-                                                <span className="metric-label" style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Energy Variation</span>
-                                                <div className="metric-value" style={{ fontWeight: "600" }}>{voiceMetrics.energy_variation.toFixed(2)}</div>
-                                            </div>
+                                        <div className="metrics-table-container" style={{ marginTop: "1rem", background: "rgba(0,0,0,0.2)", borderRadius: "8px", overflow: "hidden" }}>
+                                            <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "0.9rem", color: "rgba(255,255,255,0.9)" }}>
+                                                <thead>
+                                                    <tr style={{ background: "rgba(255,255,255,0.1)", borderBottom: "1px solid rgba(255,255,255,0.2)" }}>
+                                                        <th style={{ padding: "0.75rem", fontWeight: "600" }}>Metric</th>
+                                                        <th style={{ padding: "0.75rem", fontWeight: "600" }}>Your Score</th>
+                                                        <th style={{ padding: "0.75rem", fontWeight: "600" }}>Normal Limit</th>
+                                                        <th style={{ padding: "0.75rem", fontWeight: "600" }}>Parkinson's Indication</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                                                        <td style={{ padding: "0.75rem" }}>Pitch Instability</td>
+                                                        <td style={{ padding: "0.75rem", fontWeight: "bold", color: voiceMetrics.pitch_instability > 0.5 ? "#f87171" : "#4ade80" }}>{voiceMetrics.pitch_instability.toFixed(2)}</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&lt; 0.50</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&gt; 0.50</td>
+                                                    </tr>
+                                                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                                                        <td style={{ padding: "0.75rem" }}>Tremor Index</td>
+                                                        <td style={{ padding: "0.75rem", fontWeight: "bold", color: voiceMetrics.tremor_index > 0.5 ? "#f87171" : "#4ade80" }}>{voiceMetrics.tremor_index.toFixed(2)}</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&lt; 0.50</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&gt; 0.50</td>
+                                                    </tr>
+                                                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                                                        <td style={{ padding: "0.75rem" }}>Pause Ratio</td>
+                                                        <td style={{ padding: "0.75rem", fontWeight: "bold", color: voiceMetrics.pause_ratio > 0.5 ? "#f87171" : "#4ade80" }}>{voiceMetrics.pause_ratio.toFixed(2)}</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&lt; 0.50</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&gt; 0.50</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td style={{ padding: "0.75rem" }}>Energy Variation</td>
+                                                        <td style={{ padding: "0.75rem", fontWeight: "bold", color: voiceMetrics.energy_variation > 0.5 ? "#f87171" : "#4ade80" }}>{voiceMetrics.energy_variation.toFixed(2)}</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&lt; 0.50</td>
+                                                        <td style={{ padding: "0.75rem", color: "rgba(255,255,255,0.6)" }}>&gt; 0.50</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
                                         </div>
                                     )}
                                 </div>
@@ -559,49 +668,118 @@ Keep each bullet point to ONE line maximum. Be specific and actionable, not gene
 
                         </div>
                     </div>
+                ) : (
+                    <div className="card" style={{ gridColumn: "1 / -1" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <h2 className="card-title" style={{ margin: 0 }}>
+                                <span className="icon">📄</span>
+                                Comprehensive Final Report
+                            </h2>
+                            {sections && (
+                                <button className="analyze-btn" style={{ width: "auto", margin: 0, padding: "0.5rem 1rem", fontSize: "0.9rem" }} onClick={downloadPDF}>
+                                    📥 Download PDF
+                                </button>
+                            )}
+                        </div>
+
+                        {prediction && voicePrediction ? (
+                            <div style={{ marginTop: "1.5rem" }} id="report-content">
+                                <p style={{ color: "rgba(255,255,255,0.8)", marginBottom: "1rem" }}>
+                                    This report synthesizes the inputs from both your handwriting analysis and voice tests to give you personalized AI-driven healthcare and lifestyle recommendations.
+                                </p>
+
+                                <div style={{ display: "flex", gap: "1rem", marginBottom: "1.5rem" }}>
+                                    <div style={{ flex: 1, background: "rgba(255,255,255,0.05)", padding: "1rem", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
+                                        <strong>📝 Handwriting Result:</strong>
+                                        <div style={{ color: prediction.toLowerCase().includes("positive") || prediction.toLowerCase().includes("parkinson") ? "#f87171" : "#4ade80", fontWeight: "bold", marginTop: "0.5rem" }}>{prediction}</div>
+                                        <div style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.6)", marginTop: "0.25rem" }}>Confidence: {confidence}%</div>
+                                    </div>
+                                    <div style={{ flex: 1, background: "rgba(255,255,255,0.05)", padding: "1rem", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
+                                        <strong>🎙️ Voice Result:</strong>
+                                        <div style={{ color: voicePrediction.toLowerCase().includes("positive") || voicePrediction.toLowerCase().includes("parkinson") ? "#f87171" : "#4ade80", fontWeight: "bold", marginTop: "0.5rem" }}>{voicePrediction}</div>
+                                        <div style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.6)", marginTop: "0.25rem" }}>Confidence: {voiceConfidence}%</div>
+                                    </div>
+                                </div>
+
+                                {!sections ? (
+                                    <div style={{ textAlign: "center", padding: "2rem" }}>
+                                        <button className="analyze-btn" disabled={loading} onClick={generateFinalReport}>
+                                            {loading ? (
+                                                <><span className="spinner"></span> Generating Combined Recommendations...</>
+                                            ) : (
+                                                "🤖 Generate AI Report"
+                                            )}
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <>
+                                        {sections.summary && (
+                                            <div className="summary-card" style={{ marginBottom: "1.5rem" }}>
+                                                <h3 className="section-title">
+                                                    <span className="icon">💡</span>
+                                                    Executive Summary
+                                                </h3>
+                                                <p className="summary-text" style={{ fontSize: "1.1rem" }}>{sections.summary}</p>
+                                            </div>
+                                        )}
+
+                                        <div className="recommendations-grid" style={{ gridTemplateColumns: "1fr" }}>
+                                            {sections.lifestyle && (
+                                                <div className="card recommendation-card" style={{ background: "rgba(0,0,0,0.2)" }}>
+                                                    <h3 className="card-title">
+                                                        <span className="icon">❤️</span>
+                                                        Lifestyle Tips
+                                                    </h3>
+                                                    <div className="recommendation-content">
+                                                        <AdviceList content={sections.lifestyle} />
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {sections.healthcare && (
+                                                <div className="card recommendation-card" style={{ background: "rgba(0,0,0,0.2)" }}>
+                                                    <h3 className="card-title">
+                                                        <span className="icon">🏥</span>
+                                                        Healthcare Steps
+                                                    </h3>
+                                                    <div className="recommendation-content">
+                                                        <AdviceList content={sections.healthcare} />
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {sections.prevention && (
+                                                <div className="card recommendation-card" style={{ background: "rgba(0,0,0,0.2)" }}>
+                                                    <h3 className="card-title">
+                                                        <span className="icon">🛡️</span>
+                                                        Prevention & Next Steps
+                                                    </h3>
+                                                    <div className="recommendation-content">
+                                                        <AdviceList content={sections.prevention} />
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="empty-state">
+                                <div className="empty-icon">⏳</div>
+                                <p style={{ marginBottom: "1rem" }}>Please complete both the Handwriting and Voice Analysis tests first.</p>
+                                <div style={{ display: "flex", gap: "1rem", justifyContent: "center" }}>
+                                    <button className={`step-btn ${!prediction ? 'active' : ''}`} style={{ borderColor: prediction ? "#4ade80" : "rgba(255,255,255,0.2)" }} onClick={() => setStep(1)}>
+                                        {prediction ? '✅ Handwriting Done' : '1. Do Handwriting'}
+                                    </button>
+                                    <button className={`step-btn ${!voicePrediction ? 'active' : ''}`} style={{ borderColor: voicePrediction ? "#4ade80" : "rgba(255,255,255,0.2)" }} onClick={() => setStep(2)}>
+                                        {voicePrediction ? '✅ Voice Done' : '2. Do Voice'}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 )}
             </div>
-
-            {/* Recommendations Section - Only show in Step 1 for now or shared? Shared but below. */}
-            {step === 1 && sections && (
-                <div className="recommendations-grid">
-                    {sections.lifestyle && (
-                        <div className="card recommendation-card">
-                            <h3 className="card-title">
-                                <span className="icon">❤️</span>
-                                Lifestyle Tips
-                            </h3>
-                            <div className="recommendation-content">
-                                <AdviceList content={sections.lifestyle} />
-                            </div>
-                        </div>
-                    )}
-
-                    {sections.healthcare && (
-                        <div className="card recommendation-card">
-                            <h3 className="card-title">
-                                <span className="icon">🏥</span>
-                                Healthcare Steps
-                            </h3>
-                            <div className="recommendation-content">
-                                <AdviceList content={sections.healthcare} />
-                            </div>
-                        </div>
-                    )}
-
-                    {sections.prevention && (
-                        <div className="card recommendation-card">
-                            <h3 className="card-title">
-                                <span className="icon">🛡️</span>
-                                Prevention
-                            </h3>
-                            <div className="recommendation-content">
-                                <AdviceList content={sections.prevention} />
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
         </div>
     );
 }

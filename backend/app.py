@@ -14,10 +14,19 @@ from datetime import datetime
 import librosa
 import soundfile as sf
 from flask_sqlalchemy import SQLAlchemy
-
-
+import cv2
+import base64
+import subprocess
+from voice_analysis import analyze_voice
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app_crash.log"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # --- FFmpeg Configuration for Windows ---
@@ -157,32 +166,167 @@ def test():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if model is None:
-        return jsonify({"error": "Model not loaded"}), 503
+    try:
+        if model is None:
+            return jsonify({"error": "Model not loaded"}), 503
 
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
 
-    file = request.files['file']
+        file = request.files['file']
 
-    if not allowed_file(file.filename):
-        return jsonify({"error": "Invalid file type"}), 400
+        if not allowed_file(file.filename):
+            return jsonify({"error": "Invalid file type"}), 400
 
-    valid, msg = validate_image(file)
-    if not valid:
-        return jsonify({"error": msg}), 400
+        valid, msg = validate_image(file)
+        if not valid:
+            return jsonify({"error": msg}), 400
 
-    img = Image.open(BytesIO(file.read())).convert("RGB")
-    img = img.resize((224, 224))
-    arr = np.expand_dims(np.array(img) / 255.0, axis=0)
+        # Read image
+        img_bytes = file.read()
+        img = Image.open(BytesIO(img_bytes)).convert("RGB")
+        img_resized = img.resize((224, 224))
+        arr = np.expand_dims(np.array(img_resized) / 255.0, axis=0)
 
-    preds = model.predict(arr, verbose=0)
-    idx = np.argmax(preds[0])
+        # Predict
+        preds = model.predict(arr, verbose=0)
+        idx = np.argmax(preds[0])
+        result_class = CLASS_NAMES[idx]
+        confidence = float(preds[0][idx])
 
-    return jsonify({
-        "result": CLASS_NAMES[idx],
-        "confidence": float(preds[0][idx])
-    })
+        # Generate Grad-CAM Heatmap
+        heatmap_base64 = None
+        try:
+            import tensorflow as tf
+            
+            # Step 1: Ensure the model is trainable so gradients can flow
+            # If the model or its base was frozen, tape.gradient will return None
+            for layer in model.layers:
+                layer.trainable = True
+                if hasattr(layer, 'layers'):
+                    for inner_layer in layer.layers:
+                        inner_layer.trainable = True
+
+            # Step 2: Find the base model (MobileNetV2 is usually the first layer)
+            base_model = None
+            for layer in model.layers:
+                if isinstance(layer, tf.keras.Model):
+                    base_model = layer
+                    break
+            
+            # Step 3: Find the last convolutional layer in the base model (or main model)
+            target_model = base_model if base_model else model
+            last_conv_layer_name = None
+            
+            # Use layer.output.shape which is more reliable in TF 2.x than layer.output_shape
+            for layer in reversed(target_model.layers):
+                try:
+                    if len(layer.output.shape) == 4:
+                        last_conv_layer_name = layer.name
+                        break
+                except Exception:
+                    pass
+
+            if not last_conv_layer_name:
+                logger.warning("Could not find a 4D convolutional layer for Grad-CAM.")
+
+            if last_conv_layer_name:
+                last_conv_layer = target_model.get_layer(last_conv_layer_name)
+                
+                # Step 4: Construct a single model that outputs BOTH the conv output and the final prediction.
+                # Since we might be dealing with a nested model (Sequential(MobileNetV2, Dense)), 
+                # we need to create a custom Model that passes the input through the whole chain.
+                
+                # To trace the gradient properly:
+                inputs = tf.keras.Input(shape=(224, 224, 3))
+                
+                if base_model:
+                    # Input -> MobileNetV2(up to Conv)
+                    base_conv_model = tf.keras.Model(target_model.inputs, last_conv_layer.output)
+                    conv_outputs = base_conv_model(inputs)
+                    
+                    # Input -> Overall Model (Prediction)
+                    predictions = model(inputs)
+                    
+                    grad_model = tf.keras.Model(inputs, [conv_outputs, predictions])
+                else:
+                    grad_model = tf.keras.Model(model.inputs, [last_conv_layer.output, model.output])
+
+                # Step 5: Taping and Gradients
+                with tf.GradientTape() as tape:
+                    # Cast our image array explicitly for the tape
+                    img_tensor = tf.cast(arr, tf.float32)
+                    tape.watch(img_tensor)
+                    
+                    last_conv_layer_output, model_preds = grad_model(img_tensor)
+                    
+                    if isinstance(model_preds, list):
+                        model_preds = model_preds[0]
+                        
+                    class_channel = model_preds[:, idx]
+
+                grads = tape.gradient(class_channel, last_conv_layer_output)
+                
+                if grads is not None:
+                    # Debug prints for Grad-CAM
+                    print(f"last_conv_layer_output shape: {last_conv_layer_output.shape}")
+                    print(f"grads shape: {grads.shape}")
+                    
+                    # Ensure we are reducing over the correct axes.
+                    # If shape is 4D (batch, H, W, channels), we reduce (0, 1, 2).
+                    # If 3D, reduce (0, 1) etc.
+                    ndims = len(grads.shape)
+                    reduce_axes = tuple(range(ndims - 1))
+                    
+                    pooled_grads = tf.reduce_mean(grads, axis=reduce_axes)
+
+                    # Weight the channels by the pooled gradients
+                    # last_conv_layer_output[0] is (H, W, C), pooled_grads is (C,)
+                    weighted_conv = tf.multiply(last_conv_layer_output[0], pooled_grads)
+                    heatmap = tf.reduce_sum(weighted_conv, axis=-1)
+                    
+                    # Apply ReLU
+                    heatmap = tf.maximum(heatmap, 0)
+                    
+                    # Normalize to 0-1
+                    max_val = tf.math.reduce_max(heatmap)
+                    if max_val > 0:
+                        heatmap = heatmap / max_val
+                        
+                    heatmap = heatmap.numpy()
+
+                    # Overlay heatmap on original image
+                    img_cv = np.array(img_resized)
+                    img_cv = img_cv[:, :, ::-1] # RGB to BGR
+
+                    heatmap_resized = cv2.resize(heatmap, (img_cv.shape[1], img_cv.shape[0]))
+                    heatmap_resized = np.uint8(255 * heatmap_resized)
+                    heatmap_color = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_JET)
+
+                    superimposed_img = heatmap_color * 0.4 + img_cv * 0.6
+                    superimposed_img = np.uint8(superimposed_img)
+
+                    _, buffer = cv2.imencode('.jpg', superimposed_img)
+                    heatmap_base64 = base64.b64encode(buffer).decode('utf-8')
+                else:
+                    logger.warning(f"Gradients returned None. Check if {last_conv_layer_name} is differentiable.")
+                    heatmap_base64 = f"ERROR: Gradients returned None for layer {last_conv_layer_name}"
+        except Exception as e:
+            logger.error(f"Grad-CAM Error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            heatmap_base64 = f"ERROR: Exception {str(e)}"
+
+        return jsonify({
+            "result": result_class,
+            "confidence": confidence,
+            "heatmap": heatmap_base64
+        })
+    except Exception as e:
+        logger.error(f"Predict Error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/predict-voice", methods=["POST"])
 def predict_voice():
@@ -212,8 +356,6 @@ def predict_voice():
         wav_path = os.path.join(temp_dir, wav_filename)
         
         try:
-            import subprocess
-            import imageio_ffmpeg
             ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
             
             # Use subprocess to reliably call ffmpeg and convert the webm audio blob to standard wav
@@ -235,7 +377,6 @@ def predict_voice():
 
         # Extract features and calculate score using new voice_analysis.py
         try:
-            from voice_analysis import analyze_voice
             voice_data = analyze_voice(wav_path)
             voice_score = voice_data["voice_score"]
             metrics = voice_data["metrics"]
@@ -244,17 +385,8 @@ def predict_voice():
             logger.error(f"Error during voice analysis: {e}")
             return jsonify({"error": f"Failed to analyze audio: {str(e)}"}), 500
             
-        # Combine with Spiral CNN output
-        previous_result = request.form.get("previous_result")
-        if previous_result:
-            is_spiral_parkinson = "parkinson" in previous_result.lower()
-            # Assign a probability score based on the spiral result
-            spiral_score = 0.8 if is_spiral_parkinson else 0.2
-            # Combine scores (adjust weights as needed)
-            final_risk = (0.5 * spiral_score) + (0.5 * voice_score)
-        else:
-            final_risk = voice_score
-            
+        final_risk = voice_score
+        
         result = "Parkinson Detected" if final_risk >= 0.5 else "Healthy"
         # Confidence is the probability of the predicted class
         confidence = float(final_risk) if final_risk >= 0.5 else float(1.0 - final_risk)
@@ -374,4 +506,17 @@ if __name__ == "__main__":
     logger.info("Starting Parkinson Disease Detection API...")
     logger.info(f"Model path: {MODEL_PATH}")
     logger.info(f"Model loaded: {model is not None}")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+
+    # Warmup Numba JIT to prevent thread crashing
+    try:
+        logger.info("Starting Numba JIT warmup...")
+        import librosa
+        import numpy as np
+        dummy = np.zeros(22050, dtype=np.float32)
+        librosa.feature.mfcc(y=dummy, sr=22050, n_mfcc=13)
+        logger.info("Numba JIT warmup completed successfully.")
+    except Exception as e:
+        logger.error(f"Numba JIT warmup failed: {e}")
+
+    # Run without threading to prevent librosa/numba segfaults on Windows
+    app.run(debug=False, host="0.0.0.0", port=5000, threaded=False)
