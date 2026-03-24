@@ -8,3 +8,4 @@ soundfile
 flask-sqlalchemy
 mysql-connector-python
 pydub
+gunicorn
