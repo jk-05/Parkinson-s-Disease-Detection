@@ -1,0 +1,209 @@
+﻿diff --git a/backend/app.py b/backend/app.py
+index 69e4f5e..1c62234 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -523,6 +523,201 @@ def progression():
+         logger.error(f"Progression prediction error: {e}")
+         return jsonify({"error": str(e)}), 500
+ 
++if __name__ == "__main__":
++    logger.info("Starting Parkinson Disease Detection API...")
++    logger.info(f"Model path: {MODEL_PATH}")
++    logger.info(f"Model loaded: {model is not None}")
++
++    # Warmup Numba JIT to prevent thread crashing
++    try:
++        logger.info("Starting Numba JIT warmup...")
++        import librosa
++        import numpy as np
++        dummy = np.zeros(22050, dtype=np.float32)
++
++    try:
++        # Create temp directory if not exists
++        temp_dir = os.path.join(BASE_DIR, "temp")
++        os.makedirs(temp_dir, exist_ok=True)
++
++        # Save original file (likely .webm or .ogg from browser)
++        timestamp = datetime.now().timestamp()
++        original_filename = f"voice_{timestamp}_{file.filename}"
++        original_path = os.path.join(temp_dir, original_filename)
++        file.save(original_path)
++        logger.info(f"Saved original voice file to: {original_path}")
++        
++        # Convert to strict WAV format to prevent librosa/audioread from crashing Windows
++        wav_filename = f"voice_{timestamp}_converted.wav"
++        wav_path = os.path.join(temp_dir, wav_filename)
++        
++        try:
++            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
++            
++            # Use subprocess to reliably call ffmpeg and convert the webm audio blob to standard wav
++            # -y overwrites if exists. -i is input.
++            cmd = [ffmpeg_exe, "-y", "-i", original_path, wav_path]
++            
++            # Run the command, capturing output to avoid locking up
++            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++            
++            if process.returncode != 0:
++                logger.error(f"FFmpeg conversion failed: {process.stderr.decode('utf-8')}")
++                return jsonify({"error": "Failed to convert audio file format via FFmpeg."}), 500
++                
++            logger.info(f"Successfully converted audio to WAV format: {wav_path}")
++            
++        except Exception as e:
++            logger.error(f"Error executing FFmpeg conversion: {e}")
++            return jsonify({"error": f"Server missing dependencies for audio conversion: {str(e)}"}), 500
++
++        # Extract features and calculate score using new voice_analysis.py
++        try:
++            voice_data = analyze_voice(wav_path)
++            voice_score = voice_data["voice_score"]
++            metrics = voice_data["metrics"]
++            logger.info("Voice analysis successfully completed.")
++        except Exception as e:
++            logger.error(f"Error during voice analysis: {e}")
++            return jsonify({"error": f"Failed to analyze audio: {str(e)}"}), 500
++            
++        final_risk = voice_score
++        
++        result = "Parkinson Detected" if final_risk >= 0.5 else "Healthy"
++        # Confidence is the probability of the predicted class
++        confidence = float(final_risk) if final_risk >= 0.5 else float(1.0 - final_risk)
++
++        logger.info(f"Final Risk: {final_risk}, Result: {result}, Confidence: {confidence}")
++
++        return jsonify({
++            "result": result,
++            "confidence": confidence,
++            "voice_score": voice_score,
++            "metrics": metrics,
++            "final_risk": final_risk,
++            "message": "Voice file processed successfully"
++        })
++
++    except Exception as e:
++        logger.error(f"Error processing voice file: {e}")
++        # traceback.print_exc()
++        return jsonify({"error": f"Failed to process audio: {str(e)}"}), 500
++
++@app.route("/login", methods=["POST"])
++def login():
++    data = request.json
++    role = data.get("role")
++    username = data.get("username")
++    password = data.get("password")
++
++    if role == 'doctor':
++        user = Doctor.query.filter_by(username=username).first()
++    else:
++        user = Patient.query.filter_by(username=username).first()
++
++    if user and user.password == password:
++        # Return user ID for session storage
++        # Check if user has a name attribute (Doctor/Patient have it)
++        name = getattr(user, 'name', username)
++        age = getattr(user, 'age', None) if role == 'patient' else None
++        return jsonify({"message": "Login successful", "id": user.id, "name": name, "age": age})
++    return jsonify({"error": "Invalid credentials"}), 401
++
++@app.route("/register", methods=["POST"])
++def register():
++    data = request.json
++    try:
++        # Check if username exists in Patient table
++        if Patient.query.filter_by(username=data['username']).first():
++            return jsonify({"error": "Username already exists"}), 400
++            
++        new_patient = Patient(
++            username=data['username'],
++            password=data['password'],
++            name=data['name'],
++            age=data.get('age'),
++            contact=data.get('contact')
++        )
++        db.session.add(new_patient)
++        db.session.commit()
++        return jsonify({"message": "Registration successful"})
++    except Exception as e:
++        return jsonify({"error": str(e)}), 500
++
++@app.route("/save-result", methods=["POST"])
++def save_result():
++    data = request.json
++    try:
++        patient_id = data.get('patient_id')
++        
++        if not patient_id:
++             # Try to find by name if ID missing (legacy support)
++             name = data.get('patient_name')
++             p = Patient.query.filter_by(username=name).first() # Assuming username matches
++             if p:
++                 patient_id = p.id
++        
++        if not patient_id:
++            return jsonify({"error": "Patient identity unknown"}), 400
++
++        pred = Prediction(
++            patient_id=int(patient_id),
++            type=data.get("type"),
++            result=data.get("result"),
++            confidence=float(data.get("confidence"))
++        )
++        db.session.add(pred)
++        db.session.commit()
++        return jsonify({"message": "Saved"})
++    except Exception as e:
++        logger.error(f"Save error: {e}")
++        return jsonify({"error": str(e)}), 500
++
++@app.route("/results", methods=["GET"])
++def get_results():
++    try:
++        # Join Prediction with Patient table
++        results = db.session.query(Prediction, Patient)\
++            .join(Patient, Prediction.patient_id == Patient.id)\
++            .order_by(Prediction.timestamp.desc())\
++            .limit(50).all()
++
++        return jsonify([
++            {
++                "id": p.id,
++                "patient_id": pt.id,
++                "patient_name": pt.name, 
++                "patient_age": pt.age,
++                "patient_contact": pt.contact,
++                "type": p.type,
++                "result": p.result,
++                "confidence": p.confidence,
++                "timestamp": p.timestamp.isoformat()
++            } for p, pt in results
++        ])
++    except Exception as e:
++        logger.error(f"Fetch results error: {e}")
++        return jsonify({"error": str(e)}), 500
++
++@app.route("/predict-progression", methods=["POST"])
++def progression():
++    try:
++        data = request.json
++        risk_score = float(data.get("risk_score", 0.0))
++        age = int(data.get("age", 50))
++        symptom_score = float(data.get("symptom_score", 0.0))
++
++        progression_timeline = predict_progression(risk_score, age, symptom_score)
++        stage = estimate_stage(risk_score)
++
++        return jsonify({
++            "progression": progression_timeline,
++            "estimated_stage": stage
++        })
++    except Exception as e:
++        logger.error(f"Progression prediction error: {e}")
++        return jsonify({"error": str(e)}), 500
++
+ if __name__ == "__main__":
+     logger.info("Starting Parkinson Disease Detection API...")
+     logger.info(f"Model path: {MODEL_PATH}")
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 27b6811..67adc22 100644
+Binary files a/backend/requirements.txt and b/backend/requirements.txt differ

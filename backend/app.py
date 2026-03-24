@@ -540,4 +540,4 @@ if __name__ == "__main__":
         logger.error(f"Numba JIT warmup failed: {e}")
 
     # Run without threading to prevent librosa/numba segfaults on Windows
-    app.run(debug=False, host="0.0.0.0", port=5000, threaded=False)
+    app.run()
