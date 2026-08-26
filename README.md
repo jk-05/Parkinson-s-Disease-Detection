@@ -122,5 +122,5 @@ It is not a substitute for professional medical diagnosis.
 
 ## Author
 
-👨‍💻 **Devanand**  
+👨‍💻 **Jayakaran Prakash**  
 *Engineering Student | AI Enthusiast*
